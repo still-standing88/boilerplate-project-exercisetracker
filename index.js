@@ -59,8 +59,12 @@ app.post('/api/users', async (req, res) => {
 
 app.get('/api/users', async (req, res) => {
   try {
-    const result = await pool.query('SELECT id as _id, username FROM users')
-    res.json(result.rows)
+    const result = await pool.query('SELECT id, username FROM users')
+    const users = result.rows.map(user => ({
+      username: user.username,
+      _id: user.id
+    }))
+    res.json(users)
   } catch (err) {
     console.error('Error fetching users:', err)
     res.status(500).json({ error: 'Error fetching users' })
