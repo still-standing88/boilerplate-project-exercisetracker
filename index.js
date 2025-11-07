@@ -49,7 +49,7 @@ app.post('/api/users', async (req, res) => {
     )
     res.json({
       username: result.rows[0].username,
-      _id: result.rows[0].id
+      _id: result.rows[0].id.toString()
     })
   } catch (err) {
     console.error('Error creating user:', err)
@@ -59,11 +59,13 @@ app.post('/api/users', async (req, res) => {
 
 app.get('/api/users', async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, username FROM users')
-    const users = result.rows.map(user => ({
-      username: user.username,
-      _id: user.id
-    }))
+    const result = await pool.query('SELECT id, username FROM users ORDER BY id')
+    const users = result.rows.map(user => {
+      return {
+        username: user.username,
+        _id: user.id.toString()
+      }
+    })
     res.json(users)
   } catch (err) {
     console.error('Error fetching users:', err)
