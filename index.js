@@ -1,7 +1,7 @@
 const express = require('express')
 const app = express()
 const cors = require('cors')
-const mongoose = require('mongoose')
+const { Pool } = require('pg')
 require('dotenv').config()
 
 app.use(cors())
@@ -9,24 +9,31 @@ app.use(express.static('public'))
 app.use(express.urlencoded({ extended: false }))
 app.use(express.json())
 
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
 })
 
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true }
-})
+pool.query(`
+  CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(255) NOT NULL
+  )
+`).then(() => console.log('Users table ready'))
+  .catch(err => console.error('Error creating users table:', err))
 
-const exerciseSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  description: { type: String, required: true },
-  duration: { type: Number, required: true },
-  date: { type: Date, default: Date.now }
-})
-
-const User = mongoose.model('User', userSchema)
-const Exercise = mongoose.model('Exercise', exerciseSchema)
+pool.query(`
+  CREATE TABLE IF NOT EXISTS exercises (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id),
+    description VARCHAR(255) NOT NULL,
+    duration INTEGER NOT NULL,
+    date DATE NOT NULL DEFAULT CURRENT_DATE
+  )
+`).then(() => console.log('Exercises table ready'))
+  .catch(err => console.error('Error creating exercises table:', err))
 
 app.get('/', (req, res) => {
   res.sendFile(__dirname + '/views/index.html')
@@ -36,22 +43,26 @@ app.post('/api/users', async (req, res) => {
   const { username } = req.body
   
   try {
-    const newUser = new User({ username })
-    const savedUser = await newUser.save()
+    const result = await pool.query(
+      'INSERT INTO users (username) VALUES ($1) RETURNING id, username',
+      [username]
+    )
     res.json({
-      username: savedUser.username,
-      _id: savedUser._id
+      username: result.rows[0].username,
+      _id: result.rows[0].id
     })
   } catch (err) {
+    console.error('Error creating user:', err)
     res.status(500).json({ error: 'Error creating user' })
   }
 })
 
 app.get('/api/users', async (req, res) => {
   try {
-    const users = await User.find({}).select('_id username')
-    res.json(users)
+    const result = await pool.query('SELECT id as _id, username FROM users')
+    res.json(result.rows)
   } catch (err) {
+    console.error('Error fetching users:', err)
     res.status(500).json({ error: 'Error fetching users' })
   }
 })
@@ -61,30 +72,27 @@ app.post('/api/users/:_id/exercises', async (req, res) => {
   const { description, duration, date } = req.body
   
   try {
-    const user = await User.findById(_id)
-    if (!user) {
+    const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [_id])
+    if (userResult.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' })
     }
     
     const exerciseDate = date ? new Date(date) : new Date()
     
-    const newExercise = new Exercise({
-      userId: _id,
-      description,
-      duration: parseInt(duration),
-      date: exerciseDate
-    })
-    
-    const savedExercise = await newExercise.save()
+    const result = await pool.query(
+      'INSERT INTO exercises (user_id, description, duration, date) VALUES ($1, $2, $3, $4) RETURNING *',
+      [_id, description, parseInt(duration), exerciseDate]
+    )
     
     res.json({
-      username: user.username,
-      description: savedExercise.description,
-      duration: savedExercise.duration,
-      date: savedExercise.date.toDateString(),
-      _id: user._id
+      username: userResult.rows[0].username,
+      description: result.rows[0].description,
+      duration: result.rows[0].duration,
+      date: new Date(result.rows[0].date).toDateString(),
+      _id: parseInt(_id)
     })
   } catch (err) {
+    console.error('Error adding exercise:', err)
     res.status(500).json({ error: 'Error adding exercise' })
   }
 })
@@ -94,44 +102,51 @@ app.get('/api/users/:_id/logs', async (req, res) => {
   const { from, to, limit } = req.query
   
   try {
-    const user = await User.findById(_id)
-    if (!user) {
+    const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [_id])
+    if (userResult.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' })
     }
     
-    let filter = { userId: _id }
+    let query = 'SELECT description, duration, date FROM exercises WHERE user_id = $1'
+    const params = [_id]
+    let paramCount = 1
     
-    if (from || to) {
-      filter.date = {}
-      if (from) {
-        filter.date.$gte = new Date(from)
-      }
-      if (to) {
-        filter.date.$lte = new Date(to)
-      }
+    if (from) {
+      paramCount++
+      query += ` AND date >= $${paramCount}`
+      params.push(from)
     }
     
-    let query = Exercise.find(filter).select('description duration date')
+    if (to) {
+      paramCount++
+      query += ` AND date <= $${paramCount}`
+      params.push(to)
+    }
+    
+    query += ' ORDER BY date'
     
     if (limit) {
-      query = query.limit(parseInt(limit))
+      paramCount++
+      query += ` LIMIT $${paramCount}`
+      params.push(parseInt(limit))
     }
     
-    const exercises = await query.exec()
+    const result = await pool.query(query, params)
     
-    const log = exercises.map(exercise => ({
+    const log = result.rows.map(exercise => ({
       description: exercise.description,
       duration: exercise.duration,
-      date: exercise.date.toDateString()
+      date: new Date(exercise.date).toDateString()
     }))
     
     res.json({
-      username: user.username,
-      count: exercises.length,
-      _id: user._id,
+      username: userResult.rows[0].username,
+      count: result.rows.length,
+      _id: parseInt(_id),
       log
     })
   } catch (err) {
+    console.error('Error fetching logs:', err)
     res.status(500).json({ error: 'Error fetching logs' })
   }
 })
